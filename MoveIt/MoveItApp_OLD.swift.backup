@@ -1,43 +1,10 @@
-// This file combines all refactored components for easier Xcode integration
-// Once you add individual files to Xcode project, you can delete this file
-
 import SwiftUI
 import UserNotifications
 import Combine
 import Foundation
 import AppKit
-import CoreData
 
-// MARK: - Utilities
-
-enum TimeFormatter {
-    static func durationInMinutes(_ duration: TimeInterval) -> String {
-        let minutes = Int(duration) / 60
-        return "\(minutes) min"
-    }
-    
-    static func durationAsTimer(_ duration: TimeInterval) -> String {
-        let minutes = Int(duration) / 60
-        let seconds = Int(duration) % 60
-        return String(format: "%02d:%02d", minutes, seconds)
-    }
-    
-    static func adaptiveDuration(_ duration: TimeInterval) -> String {
-        let hours = Int(duration) / 3600
-        let minutes = (Int(duration) % 3600) / 60
-        let seconds = Int(duration) % 60
-        
-        if hours > 0 {
-            return "\(hours)h \(minutes)m"
-        } else if minutes > 0 {
-            return "\(minutes)m"
-        } else {
-            return "\(seconds)s"
-        }
-    }
-}
-
-// MARK: - Models
+// MARK: - Domain Models
 
 enum Phase: String, CaseIterable, Codable {
     case sitting = "Sitting"
@@ -64,23 +31,15 @@ enum Phase: String, CaseIterable, Codable {
     }
 }
 
-struct Schedule: Codable {
-    var sittingDuration: TimeInterval = 30 * 60
-    var standingDuration: TimeInterval = 15 * 60
-    var notificationsEnabled: Bool = true
-    var soundEnabled: Bool = true
-    var workStartTime: Date = Calendar.current.date(from: DateComponents(hour: 9, minute: 0))!
-    var workEndTime: Date = Calendar.current.date(from: DateComponents(hour: 18, minute: 0))!
-    var autoStart: Bool = true
-    var askBeforeTransition: Bool = true
-    var snoozeDuration: TimeInterval = 5 * 60
+struct PendingTransition {
+    let fromPhase: Phase
+    let toPhase: Phase
+    let timestamp: Date
     
-    var formattedSittingDuration: String {
-        TimeFormatter.durationInMinutes(sittingDuration)
-    }
-    
-    var formattedStandingDuration: String {
-        TimeFormatter.durationInMinutes(standingDuration)
+    init(from: Phase, to: Phase) {
+        self.fromPhase = from
+        self.toPhase = to
+        self.timestamp = Date()
     }
 }
 
@@ -104,46 +63,27 @@ struct SessionRecord: Codable, Identifiable {
     }
 }
 
-struct PendingTransition {
-    let fromPhase: Phase
-    let toPhase: Phase
-    let timestamp: Date
+struct Schedule: Codable {
+    var sittingDuration: TimeInterval = 30 * 60 // 30 minutes
+    var standingDuration: TimeInterval = 15 * 60 // 15 minutes
+    var notificationsEnabled: Bool = true
+    var soundEnabled: Bool = true
+    var workStartTime: Date = Calendar.current.date(from: DateComponents(hour: 9, minute: 0))!
+    var workEndTime: Date = Calendar.current.date(from: DateComponents(hour: 18, minute: 0))!
+    var autoStart: Bool = true
+    var askBeforeTransition: Bool = true // New preference for confirmation dialog
+    var snoozeDuration: TimeInterval = 5 * 60 // Default 5 minutes snooze
     
-    init(from: Phase, to: Phase) {
-        self.fromPhase = from
-        self.toPhase = to
-        self.timestamp = Date()
-    }
-}
-
-struct DailyStats {
-    var sittingTime: TimeInterval = 0
-    var standingTime: TimeInterval = 0
-    var lastUpdated: Date = Date()
-    
-    var totalTime: TimeInterval {
-        sittingTime + standingTime
+    var formattedSittingDuration: String {
+        TimeFormatter.durationInMinutes(sittingDuration)
     }
     
-    var sittingPercentage: Double {
-        guard totalTime > 0 else { return 0.5 }
-        return sittingTime / totalTime
-    }
-    
-    var formattedSittingTime: String {
-        TimeFormatter.adaptiveDuration(sittingTime)
-    }
-    
-    var formattedStandingTime: String {
-        TimeFormatter.adaptiveDuration(standingTime)
+    var formattedStandingDuration: String {
+        TimeFormatter.durationInMinutes(standingDuration)
     }
 }
 
 // MARK: - Services
-
-extension Notification.Name {
-    static let phaseCompleted = Notification.Name("phaseCompleted")
-}
 
 class TimerEngine: ObservableObject {
     @Published var currentPhase: Phase = .inactive
@@ -188,6 +128,8 @@ class TimerEngine: ObservableObject {
     
     private func startTimer() {
         timerCancellable?.cancel()
+        
+        // Use Combine timer which works better with SwiftUI
         timerCancellable = Timer.publish(every: 1.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -212,6 +154,7 @@ class TimerEngine: ObservableObject {
         
         isPaused = false
         self.pausedAt = nil
+        
         startTimer()
     }
     
@@ -250,122 +193,31 @@ class TimerEngine: ObservableObject {
     }
     
     private func phaseComplete() {
+        // Stop the timer completely
         timerCancellable?.cancel()
         timerCancellable = nil
         
+        // Post notification about phase completion - PhaseManager will handle what to do next
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .phaseCompleted, object: self.currentPhase)
         }
     }
 }
 
-class SessionManager: ObservableObject {
-    @Published private(set) var sessions: [SessionRecord] = []
-    private(set) var currentSessionIndex: Int?
-    
-    var sessionsPublisher: AnyPublisher<[SessionRecord], Never> {
-        $sessions.eraseToAnyPublisher()
-    }
-    
-    private let sessionKey = "sessions"
-    
-    init() {
-        loadSessions()
-    }
-    
-    func startSession(phase: Phase) {
-        endCurrentSession()
-        let session = SessionRecord(phase: phase)
-        sessions.append(session)
-        currentSessionIndex = sessions.count - 1
-        saveSessions()
-    }
-    
-    func endCurrentSession() {
-        guard let index = currentSessionIndex,
-              index < sessions.count else { return }
-        
-        sessions[index].end()
-        saveSessions()
-        currentSessionIndex = nil
-    }
-    
-    func saveSessions() {
-        if let data = try? JSONEncoder().encode(sessions) {
-            UserDefaults.standard.set(data, forKey: sessionKey)
-        }
-    }
-    
-    func loadSessions() {
-        if let data = UserDefaults.standard.data(forKey: sessionKey),
-           let loadedSessions = try? JSONDecoder().decode([SessionRecord].self, from: data) {
-            sessions = loadedSessions
-        } else {
-            sessions = []
-        }
-    }
-    
-    func getTodaySessions() -> [SessionRecord] {
-        let calendar = Calendar.current
-        let startOfDay = calendar.startOfDay(for: Date())
-        
-        return sessions.filter {
-            $0.startDate >= startOfDay && $0.endDate != nil
-        }
-    }
-    
-    func resetSessions() {
-        sessions = []
-        currentSessionIndex = nil
-        UserDefaults.standard.removeObject(forKey: sessionKey)
-    }
-}
-
-class TransitionManager: ObservableObject {
-    @Published var pendingTransition: PendingTransition?
-    @Published var isShowingConfirmation = false
-    
-    func handlePhaseCompleted(_ phase: Phase, askBeforeTransition: Bool) -> PendingTransition? {
-        let nextPhase: Phase = phase == .sitting ? .standing : .sitting
-        
-        if askBeforeTransition {
-            pendingTransition = PendingTransition(from: phase, to: nextPhase)
-            isShowingConfirmation = true
-            return pendingTransition
-        } else {
-            return PendingTransition(from: phase, to: nextPhase)
-        }
-    }
-    
-    func confirmTransition() {
-        guard pendingTransition != nil else { return }
-        pendingTransition = nil
-        isShowingConfirmation = false
-    }
-    
-    func snoozeTransition(duration: TimeInterval = 5 * 60) {
-        guard pendingTransition != nil else { return }
-        pendingTransition = nil
-        isShowingConfirmation = false
-    }
-    
-    func cancelTransition() {
-        pendingTransition = nil
-        isShowingConfirmation = false
-    }
+extension Notification.Name {
+    static let phaseCompleted = Notification.Name("phaseCompleted")
 }
 
 class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     @Published var permissionGranted = false
     
+    // Notification identifiers
     static let categoryIdentifier = "moveit.phase"
     static let transitionActionId = "moveit.transition"
-    static let continueActionId = "moveit.continue"
+    static let continueActionId = "moveit.continue"  
     static let snoozeActionId = "moveit.snooze"
     
-    var onTransitionAction: (() -> Void)?
-    var onContinueAction: (() -> Void)?
-    var onSnoozeAction: ((TimeInterval) -> Void)?
+    weak var phaseManager: PhaseManager?
     
     override init() {
         super.init()
@@ -375,6 +227,7 @@ class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterD
     }
     
     func setupNotificationCategories() {
+        // Create actions
         let transitionAction = UNNotificationAction(
             identifier: Self.transitionActionId,
             title: "Перейти к новому состоянию",
@@ -393,6 +246,7 @@ class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterD
             options: []
         )
         
+        // Create category
         let category = UNNotificationCategory(
             identifier: Self.categoryIdentifier,
             actions: [transitionAction, continueAction, snoozeAction],
@@ -400,6 +254,7 @@ class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterD
             options: [.customDismissAction]
         )
         
+        // Register categories
         UNUserNotificationCenter.current().setNotificationCategories([category])
     }
     
@@ -443,59 +298,55 @@ class NotificationService: NSObject, ObservableObject, UNUserNotificationCenterD
         UNUserNotificationCenter.current().add(request)
     }
     
-    func sendTransitionNotification(from: Phase, to: Phase, soundEnabled: Bool) {
-        guard permissionGranted else { return }
-        
-        let content = UNMutableNotificationContent()
-        content.title = "Time to Switch!"
-        content.body = "Your \(from.rawValue) phase is complete. Ready to switch to \(to.rawValue)?"
-        content.sound = soundEnabled ? .default : nil
-        content.categoryIdentifier = Self.categoryIdentifier
-        content.userInfo = ["fromPhase": from.rawValue, "toPhase": to.rawValue]
-        
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
-        let request = UNNotificationRequest(
-            identifier: "transition_\(Date().timeIntervalSince1970)",
-            content: content,
-            trigger: trigger
-        )
-        
-        UNUserNotificationCenter.current().add(request)
-    }
-    
     func cancelAllNotifications() {
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
     }
     
-    func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                didReceive response: UNNotificationResponse,
+    // MARK: - UNUserNotificationCenterDelegate
+    
+    func userNotificationCenter(_ center: UNUserNotificationCenter, 
+                                didReceive response: UNNotificationResponse, 
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         DispatchQueue.main.async { [weak self] in
+            guard let phaseManager = self?.phaseManager else {
+                completionHandler()
+                return
+            }
+            
             switch response.actionIdentifier {
             case Self.transitionActionId:
-                self?.onTransitionAction?()
+                phaseManager.transitionToNextPhase()
             case Self.continueActionId:
-                self?.onContinueAction?()
+                phaseManager.restartCurrentPhase()
             case Self.snoozeActionId:
-                self?.onSnoozeAction?(5 * 60)
+                let snoozeDuration = phaseManager.schedule.snoozeDuration
+                phaseManager.snoozeTransition(duration: snoozeDuration)
+            case UNNotificationDefaultActionIdentifier:
+                // User tapped the notification body
+                break
+            case UNNotificationDismissActionIdentifier:
+                // User dismissed the notification
+                break
             default:
                 break
             }
+            
             completionHandler()
         }
     }
     
-    func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                willPresent notification: UNNotification,
+    func userNotificationCenter(_ center: UNUserNotificationCenter, 
+                                willPresent notification: UNNotification, 
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        // Show notifications even when app is in foreground
         completionHandler([.banner, .sound])
     }
 }
 
-// MARK: - Coordinator
+// MARK: - View Models
 
 @MainActor
-class PhaseCoordinator: ObservableObject {
+class PhaseManager: ObservableObject {
     @Published var timerEngine: TimerEngine
     @Published var schedule: Schedule {
         didSet {
@@ -503,74 +354,71 @@ class PhaseCoordinator: ObservableObject {
             timerEngine.updateSchedule(schedule)
         }
     }
-    
-    private let sessionManager: SessionManager
-    private let transitionManager: TransitionManager
-    private let notificationService: NotificationService
-    private let statisticsService: StatisticsService
-    
     @Published var todayStats: DailyStats = DailyStats()
+    @Published var sessions: [SessionRecord] = []
+    @Published var pendingTransition: PendingTransition?
+    @Published var isShowingConfirmation = false
+    @Published var snoozeDuration: TimeInterval = 5 * 60 // Default 5 minutes
     
-    var pendingTransition: PendingTransition? {
-        transitionManager.pendingTransition
-    }
-    
-    var isShowingConfirmation: Bool {
-        transitionManager.isShowingConfirmation
-    }
-    
+    private let notificationService = NotificationService()
+    private let statisticsService = StatisticsService()
     private var cancellables = Set<AnyCancellable>()
+    private var currentSessionIndex: Int?
     private var lastPhase: Phase = .inactive
     
     init() {
         let loadedSchedule = Self.loadSchedule()
         self.schedule = loadedSchedule
-        
         self.timerEngine = TimerEngine(schedule: loadedSchedule)
-        self.sessionManager = SessionManager()
-        self.transitionManager = TransitionManager()
-        self.notificationService = NotificationService()
-        self.statisticsService = StatisticsService()
+        self.sessions = Self.loadSessions()
+        
+        // Connect notification service to this phase manager
+        notificationService.phaseManager = self
         
         setupObservers()
-        setupNotificationHandlers()
-        updateStatsFromSessions()
+        loadTodayStats()
+        updateStatsFromCoreData()
     }
     
     private func setupObservers() {
+        // Forward inner ObservableObject changes so SwiftUI updates when timer ticks
         timerEngine.objectWillChange
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
+                // Update stats with current session time
                 self?.updateLiveStats()
             }
             .store(in: &cancellables)
-        
+
         NotificationCenter.default.publisher(for: .phaseCompleted)
-            .sink { [weak self] notification in
+            .sink { notification in
                 if let phase = notification.object as? Phase {
-                    self?.handlePhaseCompleted(phase)
+                    self.handlePhaseCompleted(phase)
                 }
             }
             .store(in: &cancellables)
         
         timerEngine.$currentPhase
             .sink { [weak self] phase in
-                self?.handlePhaseChange(phase)
+                guard let self = self else { return }
+                
+                // Track phase transitions in Core Data
+                if self.lastPhase != phase && phase != .paused {
+                    if phase != .inactive && self.lastPhase != .inactive {
+                        self.statisticsService.startTransition(from: self.lastPhase, to: phase)
+                    } else if phase == .inactive && self.lastPhase != .inactive {
+                        self.statisticsService.endTransition()
+                    }
+                    self.lastPhase = phase
+                }
+                
+                if phase == .sitting || phase == .standing {
+                    self.scheduleNextNotification(for: phase)
+                }
             }
             .store(in: &cancellables)
         
-        sessionManager.sessionsPublisher
-            .sink { [weak self] _ in
-                self?.updateStatsFromSessions()
-            }
-            .store(in: &cancellables)
-        
-        transitionManager.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
-        
+        // Sync Core Data stats with UI
         statisticsService.$todayStatistics
             .compactMap { $0 }
             .sink { [weak self] coreDataStats in
@@ -579,23 +427,31 @@ class PhaseCoordinator: ObservableObject {
             .store(in: &cancellables)
     }
     
-    private func setupNotificationHandlers() {
-        notificationService.onTransitionAction = { [weak self] in
-            self?.transitionToNextPhase()
+    func startSession(phase: Phase) {
+        // End current session if exists
+        if let index = currentSessionIndex, index < sessions.count {
+            sessions[index].end()
         }
         
-        notificationService.onContinueAction = { [weak self] in
-            self?.restartCurrentPhase()
-        }
+        timerEngine.start(phase: phase)
         
-        notificationService.onSnoozeAction = { [weak self] duration in
-            self?.snoozeTransition(duration: duration)
-        }
+        // Create new session
+        let session = SessionRecord(phase: phase)
+        sessions.append(session)
+        currentSessionIndex = sessions.count - 1
+        saveSessions()
     }
     
-    func startSession(phase: Phase) {
-        sessionManager.startSession(phase: phase)
-        timerEngine.start(phase: phase)
+    private func startNewSessionIfActive() {
+        // Create a new session for the current active phase
+        if timerEngine.currentPhase == .sitting || timerEngine.currentPhase == .standing {
+            let newSession = SessionRecord(phase: timerEngine.currentPhase)
+            sessions.append(newSession)
+            currentSessionIndex = sessions.count - 1
+            saveSessions()
+        } else {
+            currentSessionIndex = nil
+        }
     }
     
     func pauseSession() {
@@ -609,101 +465,72 @@ class PhaseCoordinator: ObservableObject {
     }
     
     func skipPhase() {
-        transitionManager.cancelTransition()
-        sessionManager.endCurrentSession()
-        updateStatsFromSessions()
+        // Clear any pending transition when manually skipping
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // End current session before skipping
+        if let index = currentSessionIndex, index < sessions.count {
+            sessions[index].end()
+            saveSessions()
+            loadTodayStats()
+        }
+        
+        // Switch to next phase
         timerEngine.skip()
         
-        let newPhase = timerEngine.currentPhase
-        if newPhase == .sitting || newPhase == .standing {
-            sessionManager.startSession(phase: newPhase)
-        }
+        // Start new session for the new phase
+        startNewSessionIfActive()
     }
     
     func stopSession() {
-        transitionManager.cancelTransition()
-        sessionManager.endCurrentSession()
-        updateStatsFromSessions()
+        // Clear any pending transition
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // End current session
+        if let index = currentSessionIndex, index < sessions.count {
+            sessions[index].end()
+            saveSessions()
+            loadTodayStats()
+        }
+        currentSessionIndex = nil
         timerEngine.stop()
         notificationService.cancelAllNotifications()
     }
     
-    func confirmTransition() {
-        guard let pending = transitionManager.pendingTransition else { return }
-        
-        transitionManager.confirmTransition()
-        timerEngine.start(phase: pending.toPhase)
-        sessionManager.startSession(phase: pending.toPhase)
-        
-        if schedule.notificationsEnabled {
-            scheduleNextNotification(for: pending.toPhase)
-        }
-    }
-    
-    func snoozeTransition(duration: TimeInterval = 5 * 60) {
-        guard transitionManager.pendingTransition != nil else { return }
-        
-        transitionManager.snoozeTransition(duration: duration)
-        timerEngine.pause()
-        
-        if schedule.notificationsEnabled {
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-                guard let self = self else { return }
-                if self.timerEngine.isPaused {
-                    self.notificationService.schedulePhaseNotification(for: self.timerEngine.currentPhase, in: 0)
-                }
-            }
-        }
-    }
-    
-    func cancelTransition() {
-        transitionManager.cancelTransition()
-        timerEngine.pause()
-    }
-    
-    func resetAllStatistics() {
-        statisticsService.resetAllStatistics()
-        sessionManager.resetSessions()
-        todayStats = DailyStats()
-        updateStatsFromSessions()
-    }
-    
     private func handlePhaseCompleted(_ phase: Phase) {
-        sessionManager.endCurrentSession()
-        updateStatsFromSessions()
-        
-        let pendingTransition = transitionManager.handlePhaseCompleted(phase, askBeforeTransition: schedule.askBeforeTransition)
-        
-        if let pending = pendingTransition {
-            if schedule.askBeforeTransition {
-                notificationService.cancelAllNotifications()
-                
-                if schedule.notificationsEnabled {
-                    notificationService.sendTransitionNotification(from: pending.fromPhase, to: pending.toPhase, soundEnabled: schedule.soundEnabled)
-                }
-            } else {
-                timerEngine.skip()
-                sessionManager.startSession(phase: pending.toPhase)
-                
-                if schedule.notificationsEnabled {
-                    notificationService.schedulePhaseNotification(for: pending.toPhase, in: 0)
-                }
-            }
-        }
-    }
-    
-    private func handlePhaseChange(_ phase: Phase) {
-        if lastPhase != phase && phase != .paused {
-            if phase != .inactive && lastPhase != .inactive {
-                statisticsService.startTransition(from: lastPhase, to: phase)
-            } else if phase == .inactive && lastPhase != .inactive {
-                statisticsService.endTransition()
-            }
-            lastPhase = phase
+        // End the completed session
+        if let index = currentSessionIndex, index < sessions.count {
+            sessions[index].end()
+            saveSessions()
+            loadTodayStats()
         }
         
-        if phase == .sitting || phase == .standing {
-            scheduleNextNotification(for: phase)
+        // Determine next phase
+        let nextPhase: Phase = phase == .sitting ? .standing : .sitting
+        
+        // Check if we should ask for confirmation
+        if schedule.askBeforeTransition {
+            // Store pending transition
+            pendingTransition = PendingTransition(from: phase, to: nextPhase)
+            isShowingConfirmation = true
+            
+            // Cancel any scheduled notifications
+            notificationService.cancelAllNotifications()
+            
+            // Send actionable notification with confirmation buttons
+            if schedule.notificationsEnabled {
+                sendTransitionNotification(from: phase, to: nextPhase)
+            }
+        } else {
+            // Auto-transition (current behavior)
+            timerEngine.skip()
+            startNewSessionIfActive()
+            
+            if schedule.notificationsEnabled {
+                notificationService.schedulePhaseNotification(for: nextPhase, in: 0)
+            }
         }
     }
     
@@ -714,36 +541,121 @@ class PhaseCoordinator: ObservableObject {
         notificationService.schedulePhaseNotification(for: phase == .sitting ? .standing : .sitting, in: duration)
     }
     
-    private func transitionToNextPhase() {
-        if transitionManager.pendingTransition != nil {
+    // MARK: - Transition Confirmation Methods
+    
+    func confirmTransition() {
+        guard let pending = pendingTransition else { return }
+        
+        // Clear pending state
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // Perform the transition
+        timerEngine.start(phase: pending.toPhase)
+        startNewSessionIfActive()
+        
+        // Schedule notification for next phase
+        if schedule.notificationsEnabled {
+            scheduleNextNotification(for: pending.toPhase)
+        }
+    }
+    
+    func snoozeTransition(duration: TimeInterval = 5 * 60) {
+        guard pendingTransition != nil else { return }
+        
+        // Clear pending state
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // Pause the timer for snooze duration
+        timerEngine.pause()
+        
+        // Schedule a notification to remind after snooze
+        if schedule.notificationsEnabled {
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self = self else { return }
+                // If still paused, send a reminder
+                if self.timerEngine.isPaused {
+                    self.notificationService.schedulePhaseNotification(for: self.timerEngine.currentPhase, in: 0)
+                }
+            }
+        }
+    }
+    
+    func cancelTransition() {
+        // Clear pending state
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // Pause the current session
+        timerEngine.pause()
+    }
+    
+    // MARK: - Notification Action Methods
+    
+    func transitionToNextPhase() {
+        // If there's a pending transition, confirm it
+        if pendingTransition != nil {
             confirmTransition()
         } else if timerEngine.currentPhase == .sitting || timerEngine.currentPhase == .standing {
+            // Otherwise, skip to next phase
             skipPhase()
         }
     }
     
-    private func restartCurrentPhase() {
-        transitionManager.cancelTransition()
+    func restartCurrentPhase() {
+        // Clear any pending transition
+        pendingTransition = nil
+        isShowingConfirmation = false
         
+        // Restart the current phase if active
         let currentPhase = timerEngine.currentPhase
         if currentPhase == .sitting || currentPhase == .standing {
-            sessionManager.endCurrentSession()
-            updateStatsFromSessions()
+            // End current session
+            if let index = currentSessionIndex, index < sessions.count {
+                sessions[index].end()
+                saveSessions()
+                loadTodayStats()
+            }
             
+            // Restart the same phase
             timerEngine.start(phase: currentPhase)
-            sessionManager.startSession(phase: currentPhase)
+            startNewSessionIfActive()
             
+            // Reschedule notification
             if schedule.notificationsEnabled {
                 scheduleNextNotification(for: currentPhase)
             }
         }
     }
     
+    private func sendTransitionNotification(from: Phase, to: Phase) {
+        guard notificationService.permissionGranted else { return }
+        
+        let content = UNMutableNotificationContent()
+        content.title = "Time to Switch!"
+        content.body = "Your \(from.rawValue) phase is complete. Ready to switch to \(to.rawValue)?"
+        content.sound = schedule.soundEnabled ? .default : nil
+        content.categoryIdentifier = NotificationService.categoryIdentifier
+        content.userInfo = ["fromPhase": from.rawValue, "toPhase": to.rawValue]
+        
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: "transition_\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: trigger
+        )
+        
+        UNUserNotificationCenter.current().add(request)
+    }
+    
     private func updateLiveStats() {
         guard timerEngine.currentPhase != .inactive else { return }
         
-        updateStatsFromSessions()
+        // Load completed sessions stats
+        loadTodayStats()
         
+        // Add current active session time
         if let startTime = timerEngine.phaseStartTime {
             let currentDuration = Date().timeIntervalSince(startTime)
             
@@ -760,8 +672,13 @@ class PhaseCoordinator: ObservableObject {
         todayStats.lastUpdated = Date()
     }
     
-    private func updateStatsFromSessions() {
-        let todaySessions = sessionManager.getTodaySessions()
+    private func loadTodayStats() {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: Date())
+        
+        let todaySessions = sessions.filter { 
+            $0.startDate >= startOfDay && $0.endDate != nil 
+        }
         
         todayStats.sittingTime = todaySessions
             .filter { $0.phase == Phase.sitting.rawValue }
@@ -770,14 +687,21 @@ class PhaseCoordinator: ObservableObject {
         todayStats.standingTime = todaySessions
             .filter { $0.phase == Phase.standing.rawValue }
             .reduce(0) { $0 + $1.duration }
-        
-        todayStats.lastUpdated = Date()
     }
     
-    private func updateUIFromCoreDataStats(_ coreDataStats: DailyStatistics) {
-        todayStats.sittingTime = coreDataStats.sittingDuration
-        todayStats.standingTime = coreDataStats.standingDuration
-        todayStats.lastUpdated = coreDataStats.lastUpdated
+    private static func loadSessions() -> [SessionRecord] {
+        if let data = UserDefaults.standard.data(forKey: "sessions"),
+           let sessions = try? JSONDecoder().decode([SessionRecord].self, from: data) {
+            return sessions
+        }
+        return []
+    }
+    
+    private func saveSessions() {
+        if let data = try? JSONEncoder().encode(sessions) {
+            UserDefaults.standard.set(data, forKey: "sessions")
+        }
+        loadTodayStats()
     }
     
     private static func loadSchedule() -> Schedule {
@@ -793,53 +717,106 @@ class PhaseCoordinator: ObservableObject {
             UserDefaults.standard.set(data, forKey: "schedule")
         }
     }
+    
+    private func updateStatsFromCoreData() {
+        guard let coreDataStats = statisticsService.todayStatistics else { return }
+        updateUIFromCoreDataStats(coreDataStats)
+    }
+    
+    private func updateUIFromCoreDataStats(_ coreDataStats: DailyStatistics) {
+        todayStats.sittingTime = coreDataStats.sittingDuration
+        todayStats.standingTime = coreDataStats.standingDuration
+        todayStats.lastUpdated = coreDataStats.lastUpdated
+    }
+    
+    func resetAllStatistics() {
+        // Reset Core Data statistics
+        statisticsService.resetAllStatistics()
+        
+        // Clear UserDefaults sessions
+        sessions = []
+        UserDefaults.standard.removeObject(forKey: "sessions")
+        
+        // Reset today's stats
+        todayStats = DailyStats()
+        
+        // Reset current session index
+        currentSessionIndex = nil
+        
+        // Update stats from fresh Core Data
+        updateStatsFromCoreData()
+    }
+}
+
+struct DailyStats {
+    var sittingTime: TimeInterval = 0
+    var standingTime: TimeInterval = 0
+    var lastUpdated: Date = Date()
+    
+    var totalTime: TimeInterval {
+        sittingTime + standingTime
+    }
+    
+    var sittingPercentage: Double {
+        guard totalTime > 0 else { return 0.5 }
+        return sittingTime / totalTime
+    }
+    
+    var formattedSittingTime: String {
+        TimeFormatter.adaptiveDuration(sittingTime)
+    }
+    
+    var formattedStandingTime: String {
+        TimeFormatter.adaptiveDuration(standingTime)
+    }
 }
 
 // MARK: - Views
 
 struct MenuBarView: View {
-    @ObservedObject var coordinator: PhaseCoordinator
+    @ObservedObject var phaseManager: PhaseManager
+    @State private var selectedSnoozeTime: Int = 5
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HeaderView(coordinator: coordinator)
+            HeaderView(phaseManager: phaseManager)
             Divider()
             
-            if coordinator.timerEngine.currentPhase != .inactive {
-                ActiveSessionView(coordinator: coordinator)
+            if phaseManager.timerEngine.currentPhase != .inactive {
+                ActiveSessionView(phaseManager: phaseManager)
                 Divider()
             }
             
-            StatsView(stats: coordinator.todayStats)
+            StatsView(stats: phaseManager.todayStats)
             Divider()
             
-            ControlsView(coordinator: coordinator)
+            ControlsView(phaseManager: phaseManager)
             Divider()
             
             FooterView()
         }
         .padding()
         .frame(width: 280)
-        .alert("Phase Complete", isPresented: .constant(coordinator.isShowingConfirmation)) {
-            if let pending = coordinator.pendingTransition {
+        .alert("Phase Complete", isPresented: $phaseManager.isShowingConfirmation) {
+            if let pending = phaseManager.pendingTransition {
                 Button("Continue to \(pending.toPhase.rawValue)") {
-                    coordinator.confirmTransition()
+                    phaseManager.confirmTransition()
                 }
                 
                 Button("Snooze 5 min") {
-                    coordinator.snoozeTransition(duration: 5 * 60)
+                    phaseManager.snoozeTransition(duration: 5 * 60)
                 }
                 
                 Button("Snooze 10 min") {
-                    coordinator.snoozeTransition(duration: 10 * 60)
+                    phaseManager.snoozeTransition(duration: 10 * 60)
                 }
                 
                 Button("Pause", role: .cancel) {
-                    coordinator.cancelTransition()
+                    phaseManager.cancelTransition()
                 }
             }
         } message: {
-            if let pending = coordinator.pendingTransition {
+            if let pending = phaseManager.pendingTransition {
                 Text("Your \(pending.fromPhase.rawValue) phase is complete. Ready to switch to \(pending.toPhase.rawValue)?")
             }
         }
@@ -847,56 +824,56 @@ struct MenuBarView: View {
 }
 
 struct HeaderView: View {
-    @ObservedObject var coordinator: PhaseCoordinator
+    @ObservedObject var phaseManager: PhaseManager
     
     var body: some View {
         HStack {
-            Image(systemName: coordinator.timerEngine.currentPhase.icon)
+            Image(systemName: phaseManager.timerEngine.currentPhase.icon)
                 .font(.title2)
-                .foregroundColor(coordinator.timerEngine.currentPhase.color)
+                .foregroundColor(phaseManager.timerEngine.currentPhase.color)
             
             VStack(alignment: .leading, spacing: 2) {
                 Text("MoveIt")
                     .font(.headline)
-                Text(coordinator.timerEngine.currentPhase.rawValue)
+                Text(phaseManager.timerEngine.currentPhase.rawValue)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             
             Spacer()
             
-            if coordinator.timerEngine.currentPhase != .inactive {
-                Text(coordinator.timerEngine.formattedRemainingTime)
+            if phaseManager.timerEngine.currentPhase != .inactive {
+                Text(phaseManager.timerEngine.formattedRemainingTime)
                     .font(.system(.title3, design: .monospaced))
-                    .foregroundColor(coordinator.timerEngine.currentPhase.color)
+                    .foregroundColor(phaseManager.timerEngine.currentPhase.color)
             }
         }
     }
 }
 
 struct ActiveSessionView: View {
-    @ObservedObject var coordinator: PhaseCoordinator
+    @ObservedObject var phaseManager: PhaseManager
     
     var body: some View {
         VStack(spacing: 8) {
-            ProgressView(value: coordinator.timerEngine.progress)
+            ProgressView(value: phaseManager.timerEngine.progress)
                 .progressViewStyle(LinearProgressViewStyle())
-                .tint(coordinator.timerEngine.currentPhase.color)
+                .tint(phaseManager.timerEngine.currentPhase.color)
             
             HStack(spacing: 12) {
-                if coordinator.timerEngine.isPaused {
-                    Button(action: { coordinator.resumeSession() }) {
+                if phaseManager.timerEngine.isPaused {
+                    Button(action: { phaseManager.resumeSession() }) {
                         Label("Resume", systemImage: "play.fill")
                             .frame(maxWidth: .infinity)
                     }
                 } else {
-                    Button(action: { coordinator.pauseSession() }) {
+                    Button(action: { phaseManager.pauseSession() }) {
                         Label("Pause", systemImage: "pause.fill")
                             .frame(maxWidth: .infinity)
                     }
                 }
                 
-                Button(action: { coordinator.skipPhase() }) {
+                Button(action: { phaseManager.skipPhase() }) {
                     Label("Skip", systemImage: "forward.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -965,19 +942,19 @@ struct StatItem: View {
 }
 
 struct ControlsView: View {
-    @ObservedObject var coordinator: PhaseCoordinator
+    @ObservedObject var phaseManager: PhaseManager
     
     var body: some View {
         VStack(spacing: 8) {
-            if coordinator.timerEngine.currentPhase == .inactive {
-                Button(action: { coordinator.startSession(phase: .sitting) }) {
+            if phaseManager.timerEngine.currentPhase == .inactive {
+                Button(action: { phaseManager.startSession(phase: .sitting) }) {
                     Label("Start Working", systemImage: "play.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
             } else {
-                Button(action: { coordinator.stopSession() }) {
+                Button(action: { phaseManager.stopSession() }) {
                     Label("Stop Session", systemImage: "stop.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -995,7 +972,9 @@ struct FooterView: View {
     var body: some View {
         HStack {
             Button(action: {
+                // Dismiss the MenuBarExtra popup
                 dismiss()
+                // Open settings window after a small delay to ensure popup is dismissed
                 DispatchQueue.main.async {
                     NSApplication.shared.activate(ignoringOtherApps: true)
                     openSettings()
@@ -1016,7 +995,7 @@ struct FooterView: View {
 }
 
 struct SettingsView: View {
-    @EnvironmentObject var coordinator: PhaseCoordinator
+    @EnvironmentObject var phaseManager: PhaseManager
     @State private var schedule = Schedule()
     @State private var sittingMinutes: Double = 30
     @State private var standingMinutes: Double = 15
@@ -1100,7 +1079,7 @@ struct SettingsView: View {
         .alert("Reset All Statistics", isPresented: $showingResetAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Reset", role: .destructive) {
-                coordinator.resetAllStatistics()
+                phaseManager.resetAllStatistics()
                 showingResetConfirmation = true
             }
         } message: {
@@ -1114,7 +1093,7 @@ struct SettingsView: View {
     }
     
     private func loadSettings() {
-        schedule = coordinator.schedule
+        schedule = phaseManager.schedule
         sittingMinutes = Double(Int(schedule.sittingDuration) / 60)
         standingMinutes = Double(Int(schedule.standingDuration) / 60)
         snoozeMinutes = Double(Int(schedule.snoozeDuration) / 60)
@@ -1124,7 +1103,9 @@ struct SettingsView: View {
         schedule.sittingDuration = sittingMinutes * 60
         schedule.standingDuration = standingMinutes * 60
         schedule.snoozeDuration = snoozeMinutes * 60
-        coordinator.schedule = schedule
+        
+        // Update the phaseManager's schedule
+        phaseManager.schedule = schedule
     }
 }
 
@@ -1132,16 +1113,20 @@ struct SettingsView: View {
 
 @main
 struct MoveItApp: App {
-    @StateObject private var coordinator = PhaseCoordinator()
+    @StateObject private var phaseManager = PhaseManager()
+    
+    init() {
+        // Configure appearance if needed
+    }
     
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(coordinator: coordinator)
+            MenuBarView(phaseManager: phaseManager)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: coordinator.timerEngine.currentPhase.icon)
-                if coordinator.timerEngine.currentPhase != .inactive {
-                    Text(coordinator.timerEngine.formattedRemainingTime)
+                Image(systemName: phaseManager.timerEngine.currentPhase.icon)
+                if phaseManager.timerEngine.currentPhase != .inactive {
+                    Text(phaseManager.timerEngine.formattedRemainingTime)
                         .font(.system(.caption, design: .monospaced))
                 }
             }
@@ -1150,7 +1135,7 @@ struct MoveItApp: App {
         
         Settings {
             SettingsView()
-                .environmentObject(coordinator)
+                .environmentObject(phaseManager)
         }
     }
 }
