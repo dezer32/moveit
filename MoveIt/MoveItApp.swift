@@ -462,11 +462,15 @@ struct DailyStats {
     private func formatTime(_ time: TimeInterval) -> String {
         let hours = Int(time) / 3600
         let minutes = (Int(time) % 3600) / 60
+        let seconds = Int(time) % 60
         
         if hours > 0 {
             return "\(hours)h \(minutes)m"
-        } else {
+        } else if minutes > 0 {
             return "\(minutes)m"
+        } else {
+            // Show seconds only in the first minute
+            return "\(seconds)s"
         }
     }
 }
