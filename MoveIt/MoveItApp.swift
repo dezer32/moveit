@@ -261,8 +261,10 @@ class PhaseManager: ObservableObject {
     @Published var sessions: [SessionRecord] = []
     
     private let notificationService = NotificationService()
+    private let statisticsService = StatisticsService()
     private var cancellables = Set<AnyCancellable>()
     private var currentSessionIndex: Int?
+    private var lastPhase: Phase = .inactive
     
     init() {
         let loadedSchedule = Self.loadSchedule()
@@ -272,6 +274,7 @@ class PhaseManager: ObservableObject {
         
         setupObservers()
         loadTodayStats()
+        updateStatsFromCoreData()
     }
     
     private func setupObservers() {
@@ -293,10 +296,30 @@ class PhaseManager: ObservableObject {
             .store(in: &cancellables)
         
         timerEngine.$currentPhase
-            .sink { phase in
+            .sink { [weak self] phase in
+                guard let self = self else { return }
+                
+                // Track phase transitions in Core Data
+                if self.lastPhase != phase && phase != .paused {
+                    if phase != .inactive && self.lastPhase != .inactive {
+                        self.statisticsService.startTransition(from: self.lastPhase, to: phase)
+                    } else if phase == .inactive && self.lastPhase != .inactive {
+                        self.statisticsService.endTransition()
+                    }
+                    self.lastPhase = phase
+                }
+                
                 if phase == .sitting || phase == .standing {
                     self.scheduleNextNotification(for: phase)
                 }
+            }
+            .store(in: &cancellables)
+        
+        // Sync Core Data stats with UI
+        statisticsService.$todayStatistics
+            .compactMap { $0 }
+            .sink { [weak self] coreDataStats in
+                self?.updateUIFromCoreDataStats(coreDataStats)
             }
             .store(in: &cancellables)
     }
@@ -316,12 +339,26 @@ class PhaseManager: ObservableObject {
         saveSessions()
     }
     
+    private func startNewSessionIfActive() {
+        // Create a new session for the current active phase
+        if timerEngine.currentPhase == .sitting || timerEngine.currentPhase == .standing {
+            let newSession = SessionRecord(phase: timerEngine.currentPhase)
+            sessions.append(newSession)
+            currentSessionIndex = sessions.count - 1
+            saveSessions()
+        } else {
+            currentSessionIndex = nil
+        }
+    }
+    
     func pauseSession() {
         timerEngine.pause()
+        statisticsService.pauseTransition()
     }
     
     func resumeSession() {
         timerEngine.resume()
+        statisticsService.resumeTransition()
     }
     
     func skipPhase() {
@@ -331,7 +368,12 @@ class PhaseManager: ObservableObject {
             saveSessions()
             loadTodayStats()
         }
+        
+        // Switch to next phase
         timerEngine.skip()
+        
+        // Start new session for the new phase
+        startNewSessionIfActive()
     }
     
     func stopSession() {
@@ -353,6 +395,9 @@ class PhaseManager: ObservableObject {
             saveSessions()
             loadTodayStats()
         }
+        
+        // Start new session for the new phase (timerEngine already switched)
+        startNewSessionIfActive()
         
         if schedule.notificationsEnabled {
             let nextPhase: Phase = phase == .sitting ? .standing : .sitting
@@ -434,6 +479,35 @@ class PhaseManager: ObservableObject {
         if let data = try? JSONEncoder().encode(schedule) {
             UserDefaults.standard.set(data, forKey: "schedule")
         }
+    }
+    
+    private func updateStatsFromCoreData() {
+        guard let coreDataStats = statisticsService.todayStatistics else { return }
+        updateUIFromCoreDataStats(coreDataStats)
+    }
+    
+    private func updateUIFromCoreDataStats(_ coreDataStats: DailyStatistics) {
+        todayStats.sittingTime = coreDataStats.sittingDuration
+        todayStats.standingTime = coreDataStats.standingDuration
+        todayStats.lastUpdated = coreDataStats.lastUpdated
+    }
+    
+    func resetAllStatistics() {
+        // Reset Core Data statistics
+        statisticsService.resetAllStatistics()
+        
+        // Clear UserDefaults sessions
+        sessions = []
+        UserDefaults.standard.removeObject(forKey: "sessions")
+        
+        // Reset today's stats
+        todayStats = DailyStats()
+        
+        // Reset current session index
+        currentSessionIndex = nil
+        
+        // Update stats from fresh Core Data
+        updateStatsFromCoreData()
     }
 }
 
@@ -679,6 +753,8 @@ struct SettingsView: View {
     @State private var schedule = Schedule()
     @State private var sittingMinutes: Double = 30
     @State private var standingMinutes: Double = 15
+    @State private var showingResetAlert = false
+    @State private var showingResetConfirmation = false
     @Environment(\.dismiss) var dismiss
     
     var body: some View {
@@ -708,6 +784,21 @@ struct SettingsView: View {
                 Section("Automation") {
                     Toggle("Auto-start on launch", isOn: $schedule.autoStart)
                 }
+                
+                Section("Data Management") {
+                    HStack {
+                        Text("Reset all statistics data")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button(action: {
+                            showingResetAlert = true
+                        }) {
+                            Label("Reset Statistics", systemImage: "trash")
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
             }
             .padding()
             
@@ -728,9 +819,23 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 400, height: 400)
+        .frame(width: 400, height: 450)
         .onAppear {
             loadSettings()
+        }
+        .alert("Reset All Statistics", isPresented: $showingResetAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                phaseManager.resetAllStatistics()
+                showingResetConfirmation = true
+            }
+        } message: {
+            Text("This will permanently delete all your session history and statistics. This action cannot be undone.")
+        }
+        .alert("Statistics Reset", isPresented: $showingResetConfirmation) {
+            Button("OK") { }
+        } message: {
+            Text("All statistics have been successfully reset.")
         }
     }
     

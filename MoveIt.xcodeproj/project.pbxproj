@@ -10,6 +10,8 @@
 		8D1A2B3C2C1234567890AB01 /* MoveItApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1A2B3B2C1234567890AB01 /* MoveItApp.swift */; };
 		8D1A2B3E2C1234567890AB02 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8D1A2B3D2C1234567890AB02 /* Assets.xcassets */; };
 		8D1A2B412C1234567890AB03 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8D1A2B402C1234567890AB03 /* Preview Assets.xcassets */; };
+		8D1A2B442C1234567890AB06 /* StatisticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1A2B452C1234567890AB06 /* StatisticsService.swift */; };
+		8D1A2B462C1234567890AB07 /* MoveIt.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 8D1A2B472C1234567890AB07 /* MoveIt.xcdatamodeld */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,6 +21,8 @@
 		8D1A2B402C1234567890AB03 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		8D1A2B422C1234567890AB04 /* MoveIt.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MoveIt.entitlements; sourceTree = "<group>"; };
 		8D1A2B432C1234567890AB05 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		8D1A2B452C1234567890AB06 /* StatisticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatisticsService.swift; sourceTree = "<group>"; };
+		8D1A2B472C1234567890AB07 /* MoveIt.xcdatamodeld */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodeld; path = MoveIt.xcdatamodeld; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +56,8 @@
 			isa = PBXGroup;
 			children = (
 				8D1A2B3B2C1234567890AB01 /* MoveItApp.swift */,
+				8D1A2B452C1234567890AB06 /* StatisticsService.swift */,
+				8D1A2B472C1234567890AB07 /* MoveIt.xcdatamodeld */,
 				8D1A2B3D2C1234567890AB02 /* Assets.xcassets */,
 				8D1A2B422C1234567890AB04 /* MoveIt.entitlements */,
 				8D1A2B432C1234567890AB05 /* Info.plist */,
@@ -139,6 +145,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				8D1A2B3C2C1234567890AB01 /* MoveItApp.swift in Sources */,
+				8D1A2B442C1234567890AB06 /* StatisticsService.swift in Sources */,
+				8D1A2B462C1234567890AB07 /* MoveIt.xcdatamodeld in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
