@@ -497,7 +497,6 @@ struct MenuBarView: View {
             Divider()
             
             FooterView()
-                .environmentObject(phaseManager)
         }
         .padding()
         .frame(width: 280)
@@ -647,11 +646,20 @@ struct ControlsView: View {
 }
 
 struct FooterView: View {
-    @EnvironmentObject var phaseManager: PhaseManager
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openSettings) private var openSettings
     
     var body: some View {
         HStack {
-            Button(action: { openSettingsWindow() }) {
+            Button(action: {
+                // Dismiss the MenuBarExtra popup
+                dismiss()
+                // Open settings window after a small delay to ensure popup is dismissed
+                DispatchQueue.main.async {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    openSettings()
+                }
+            }) {
                 Label("Settings", systemImage: "gearshape")
             }
             .buttonStyle(.plain)
@@ -663,31 +671,6 @@ struct FooterView: View {
             }
             .buttonStyle(.plain)
         }
-    }
-    
-    private func openSettingsWindow() {
-        // Check if settings window already exists
-        if let existingWindow = NSApplication.shared.windows.first(where: { $0.title == "MoveIt Settings" }) {
-            existingWindow.makeKeyAndOrderFront(nil)
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            return
-        }
-        
-        // Create new settings window
-        let settingsView = SettingsView()
-            .environmentObject(phaseManager)
-        
-        let hostingController = NSHostingController(rootView: settingsView)
-        let window = NSWindow(contentViewController: hostingController)
-        
-        window.title = "MoveIt Settings"
-        window.setContentSize(NSSize(width: 400, height: 400))
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.level = .floating
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        
-        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
@@ -789,5 +772,10 @@ struct MoveItApp: App {
             }
         }
         .menuBarExtraStyle(.window)
+        
+        Settings {
+            SettingsView()
+                .environmentObject(phaseManager)
+        }
     }
 }
