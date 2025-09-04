@@ -31,6 +31,18 @@ enum Phase: String, CaseIterable, Codable {
     }
 }
 
+struct PendingTransition {
+    let fromPhase: Phase
+    let toPhase: Phase
+    let timestamp: Date
+    
+    init(from: Phase, to: Phase) {
+        self.fromPhase = from
+        self.toPhase = to
+        self.timestamp = Date()
+    }
+}
+
 struct SessionRecord: Codable, Identifiable {
     var id: UUID
     var phase: String
@@ -59,6 +71,7 @@ struct Schedule: Codable {
     var workStartTime: Date = Calendar.current.date(from: DateComponents(hour: 9, minute: 0))!
     var workEndTime: Date = Calendar.current.date(from: DateComponents(hour: 18, minute: 0))!
     var autoStart: Bool = true
+    var askBeforeTransition: Bool = true // New preference for confirmation dialog
     
     var formattedSittingDuration: String {
         formatDuration(sittingDuration)
@@ -186,8 +199,14 @@ class TimerEngine: ObservableObject {
     }
     
     private func phaseComplete() {
-        NotificationCenter.default.post(name: .phaseCompleted, object: currentPhase)
-        skip()
+        // Stop the timer completely
+        timerCancellable?.cancel()
+        timerCancellable = nil
+        
+        // Post notification about phase completion - PhaseManager will handle what to do next
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .phaseCompleted, object: self.currentPhase)
+        }
     }
 }
 
@@ -249,6 +268,7 @@ class NotificationService: ObservableObject {
 
 // MARK: - View Models
 
+@MainActor
 class PhaseManager: ObservableObject {
     @Published var timerEngine: TimerEngine
     @Published var schedule: Schedule {
@@ -259,6 +279,9 @@ class PhaseManager: ObservableObject {
     }
     @Published var todayStats: DailyStats = DailyStats()
     @Published var sessions: [SessionRecord] = []
+    @Published var pendingTransition: PendingTransition?
+    @Published var isShowingConfirmation = false
+    @Published var snoozeDuration: TimeInterval = 5 * 60 // Default 5 minutes
     
     private let notificationService = NotificationService()
     private let statisticsService = StatisticsService()
@@ -362,6 +385,10 @@ class PhaseManager: ObservableObject {
     }
     
     func skipPhase() {
+        // Clear any pending transition when manually skipping
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
         // End current session before skipping
         if let index = currentSessionIndex, index < sessions.count {
             sessions[index].end()
@@ -377,6 +404,10 @@ class PhaseManager: ObservableObject {
     }
     
     func stopSession() {
+        // Clear any pending transition
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
         // End current session
         if let index = currentSessionIndex, index < sessions.count {
             sessions[index].end()
@@ -396,12 +427,30 @@ class PhaseManager: ObservableObject {
             loadTodayStats()
         }
         
-        // Start new session for the new phase (timerEngine already switched)
-        startNewSessionIfActive()
+        // Determine next phase
+        let nextPhase: Phase = phase == .sitting ? .standing : .sitting
         
-        if schedule.notificationsEnabled {
-            let nextPhase: Phase = phase == .sitting ? .standing : .sitting
-            notificationService.schedulePhaseNotification(for: nextPhase, in: 0)
+        // Check if we should ask for confirmation
+        if schedule.askBeforeTransition {
+            // Store pending transition
+            pendingTransition = PendingTransition(from: phase, to: nextPhase)
+            isShowingConfirmation = true
+            
+            // Cancel any scheduled notifications
+            notificationService.cancelAllNotifications()
+            
+            // Send actionable notification with confirmation buttons
+            if schedule.notificationsEnabled {
+                sendTransitionNotification(from: phase, to: nextPhase)
+            }
+        } else {
+            // Auto-transition (current behavior)
+            timerEngine.skip()
+            startNewSessionIfActive()
+            
+            if schedule.notificationsEnabled {
+                notificationService.schedulePhaseNotification(for: nextPhase, in: 0)
+            }
         }
     }
     
@@ -410,6 +459,76 @@ class PhaseManager: ObservableObject {
         
         let duration = phase == .sitting ? schedule.sittingDuration : schedule.standingDuration
         notificationService.schedulePhaseNotification(for: phase == .sitting ? .standing : .sitting, in: duration)
+    }
+    
+    // MARK: - Transition Confirmation Methods
+    
+    func confirmTransition() {
+        guard let pending = pendingTransition else { return }
+        
+        // Clear pending state
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // Perform the transition
+        timerEngine.start(phase: pending.toPhase)
+        startNewSessionIfActive()
+        
+        // Schedule notification for next phase
+        if schedule.notificationsEnabled {
+            scheduleNextNotification(for: pending.toPhase)
+        }
+    }
+    
+    func snoozeTransition(duration: TimeInterval = 5 * 60) {
+        guard pendingTransition != nil else { return }
+        
+        // Clear pending state
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // Pause the timer for snooze duration
+        timerEngine.pause()
+        
+        // Schedule a notification to remind after snooze
+        if schedule.notificationsEnabled {
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self = self else { return }
+                // If still paused, send a reminder
+                if self.timerEngine.isPaused {
+                    self.notificationService.schedulePhaseNotification(for: self.timerEngine.currentPhase, in: 0)
+                }
+            }
+        }
+    }
+    
+    func cancelTransition() {
+        // Clear pending state
+        pendingTransition = nil
+        isShowingConfirmation = false
+        
+        // Pause the current session
+        timerEngine.pause()
+    }
+    
+    private func sendTransitionNotification(from: Phase, to: Phase) {
+        guard notificationService.permissionGranted else { return }
+        
+        let content = UNMutableNotificationContent()
+        content.title = "Time to Switch!"
+        content.body = "Your \(from.rawValue) phase is complete. Ready to switch to \(to.rawValue)?"
+        content.sound = schedule.soundEnabled ? .default : nil
+        content.categoryIdentifier = "PHASE_TRANSITION"
+        content.userInfo = ["fromPhase": from.rawValue, "toPhase": to.rawValue]
+        
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: "transition_\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: trigger
+        )
+        
+        UNUserNotificationCenter.current().add(request)
     }
     
     private func updateLiveStats() {
@@ -553,6 +672,7 @@ struct DailyStats {
 
 struct MenuBarView: View {
     @ObservedObject var phaseManager: PhaseManager
+    @State private var selectedSnoozeTime: Int = 5
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -574,6 +694,29 @@ struct MenuBarView: View {
         }
         .padding()
         .frame(width: 280)
+        .alert("Phase Complete", isPresented: $phaseManager.isShowingConfirmation) {
+            if let pending = phaseManager.pendingTransition {
+                Button("Continue to \(pending.toPhase.rawValue)") {
+                    phaseManager.confirmTransition()
+                }
+                
+                Button("Snooze 5 min") {
+                    phaseManager.snoozeTransition(duration: 5 * 60)
+                }
+                
+                Button("Snooze 10 min") {
+                    phaseManager.snoozeTransition(duration: 10 * 60)
+                }
+                
+                Button("Pause", role: .cancel) {
+                    phaseManager.cancelTransition()
+                }
+            }
+        } message: {
+            if let pending = phaseManager.pendingTransition {
+                Text("Your \(pending.fromPhase.rawValue) phase is complete. Ready to switch to \(pending.toPhase.rawValue)?")
+            }
+        }
     }
 }
 
@@ -783,6 +926,7 @@ struct SettingsView: View {
                 
                 Section("Automation") {
                     Toggle("Auto-start on launch", isOn: $schedule.autoStart)
+                    Toggle("Ask before phase transitions", isOn: $schedule.askBeforeTransition)
                 }
                 
                 Section("Data Management") {
